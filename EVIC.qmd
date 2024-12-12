@@ -1,0 +1,1741 @@
+---
+title: Potenciando la generación aumentada usando recuperación con grafos de conocimiento
+author: 'Alonso Silva (Github: alonsosilvaallende)'
+format:
+  revealjs:
+    theme: default
+    scrollable: true
+    toc: true
+    toc-depth: 1
+    slide-level: 3
+    slide-number: true
+jupyter:
+  jupytext:
+    formats: 'ipynb,qmd'
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.16.4
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+### hi 👋, I'm Alonso {.smaller}
+
+- Researcher on Generative AI at Nokia Bell Labs
+- AI Consultant/Trainer
+- PhD at Inria, post-doc at UC Berkeley
+- Based in Paris, France
+- [https://alonsosilvaallende.github.io/](https://alonsosilvaallende.github.io/)
+    - Github: [https://github.com/alonsosilvaallende/](https://github.com/alonsosilvaallende/)
+    - Twitter: [@alonsosilva](https://twitter.com/alonsosilva)
+    - Bluesky: [https://bsky.app/profile/alonsosilva.bsky.social](https://bsky.app/profile/alonsosilva.bsky.social)
+    - Mastodon: [https://sigmoid.social/@alonsosilva](https://sigmoid.social/@alonsosilva)
+    - Linkedin: [https://www.linkedin.com/in/alonsosilvaallende/](https://www.linkedin.com/in/alonsosilvaallende/)
+
+###
+
+- Slides: [https://alonsosilvaallende.github.io/2024-EVIC/](https://alonsosilvaallende.github.io/2024-EVIC/)
+- This presentation: [https://github.com/alonsosilvaallende/2024-EVIC/blob/main/EVIC.ipynb](https://github.com/alonsosilvaallende/2024-EVIC/blob/main/EVIC.ipynb)
+
+```{python}
+from IPython.display import IFrame
+```
+
+# Introduction
+
+### Data
+
+```{python}
+#| echo: true
+import polars as pl
+import string
+
+df = pl.read_csv(
+    "https://drive.google.com/uc?export=download&id=1uD3h7xYxr9EoZ0Ggoh99JtQXa3AxtxyU"
+)
+df = df.with_columns(
+    pl.Series("Album", [string.capwords(album) for album in df["Album"]])
+)
+df = df.with_columns(
+    pl.Series("Song", [string.capwords(song) for song in df["Song"]])
+)
+df = df.with_columns(pl.col("Lyrics").fill_null("None"))
+df.head()
+```
+
+```{python}
+# #| echo: true
+# import string
+
+# df = df.with_columns(
+#     pl.Series("Album", [string.capwords(album) for album in df["Album"]])
+# )
+# df = df.with_columns(
+#     pl.Series("Song", [string.capwords(song) for song in df["Song"]])
+# )
+# df = df.with_columns(pl.col("Lyrics").fill_null("None"))
+# df.head()
+```
+
+### Potential kind of queries
+
+```{python}
+#| echo: true
+queries = [
+    "Which song is about a boy who is having nightmares?",
+    """Which song is about a guy who is so badly wounded in war 
+    so he no longer has any senses?""",
+    "How many songs does the reload album have?",
+    "Which songs does the black album have?"
+]
+```
+
+# Vector-only retrieval
+
+### {.nostretch}
+
+![](./assets/lancedb-logo.svg "LanceDB logo"){width="40%"}
+
+Vector database: [https://lancedb.com/](https://lancedb.com/)
+
+### Vector-only retrieval
+
+```{python}
+# #| echo: true
+# df = df.with_columns(
+#     text=pl.lit("Album: ")
+#     + pl.col("Album")
+#     + pl.lit("\nSong: ")
+#     + pl.col("Song")
+#     + pl.lit("\n\n")
+#     + pl.col("Lyrics")
+# )
+
+# df.head()
+```
+
+```{python}
+#| echo: true
+df = df.with_columns(
+    text=pl.lit("# ")
+    + pl.col("Album")
+    + pl.lit(": ")
+    + pl.col("Song")
+    + pl.lit("\n\n")
+    + pl.col("Lyrics")
+)
+
+df.head()
+```
+
+### Vector-only retrieval
+
+```{python}
+#| echo: true
+print(df.select("text")[1].item()[:300])
+print("...")
+```
+
+### Vector-only retrieval
+
+```{python}
+#| echo: true
+# Initialize vector database
+import shutil
+import lancedb
+
+shutil.rmtree("lancedb_explorer", ignore_errors=True)
+db = lancedb.connect("lancedb_explorer")
+```
+
+### Vector-only retrieval
+
+```{python}
+#| echo: true
+from lancedb.embeddings import get_registry
+
+embeddings = (
+    get_registry()
+    .get("sentence-transformers")
+    .create(name="TaylorAI/gte-tiny", device="cuda")
+)
+```
+
+### Vector-only retrieval
+
+```{python}
+#| echo: true
+from lancedb.pydantic import LanceModel, Vector
+
+class Songs(LanceModel):
+    Song: str
+    Lyrics: str
+    Album: str
+    Artist: str
+    text: str = embeddings.SourceField()
+    vector: Vector(embeddings.ndims()) = embeddings.VectorField()
+```
+
+### Vector-only retrieval
+
+```{python}
+#| echo: true
+# Add dataframe to the vector database
+table = db.create_table("Songs", schema=Songs)
+table.add(data=df)
+```
+
+```{python}
+# define reranker if you want different weigths than the defaults 
+# and to return all scores
+from lancedb.rerankers import LinearCombinationReranker
+
+reranker = LinearCombinationReranker(
+    weight=0.9, return_score="all"
+)  # Use 0.9 as the weight for semantic search
+```
+
+### Vector-only retrieval
+
+```{python}
+#| echo: true
+query = "Which song is about a boy who is having nightmares?"
+results = table.search(query).limit(10).to_polars()
+results.select(["Song","Album", "Lyrics", "_distance", "vector"])
+```
+
+### Vector-only retrieval
+
+```{python}
+#| echo: true
+query = "Which song is about a boy who is having nightmares?"
+results = table.search(query).limit(10).to_polars()
+results["Song"].to_list()
+```
+
+### Vector-only retrieval
+
+```{python}
+#| echo: true
+query = """Which song is about a guy who is so badly wounded in war
+so he no longer has any senses?"""
+results = table.search(query).limit(10).to_polars()
+results["Song"].to_list()
+```
+
+## Vector-only retrieval
+
+[https://alonsosilva-song-finder.hf.space](https://alonsosilva-song-finder.hf.space)
+
+```{python}
+IFrame("https://alonsosilva-song-finder.hf.space", width=850, height=450)
+```
+
+###
+::: {style="margin-top: 200px; font-size: 2em; color: black;"}
+Retrieval Augmented Generation (RAG)
+:::
+
+```{python}
+# #| echo: true
+# import llama_cpp
+
+# llm = llama_cpp.Llama(
+#     "/big_storage/llms/models/Hermes-3-Llama-3.1-8B.Q6_K.gguf",
+#     tokenizer=llama_cpp.llama_tokenizer.LlamaHFTokenizer.from_pretrained(
+#         "NousResearch/Hermes-3-Llama-3.1-8B"
+#     ),
+#     n_gpu_layers=-1,
+#     flash_attn=True,
+#     n_ctx=8192,
+#     verbose=False,
+# )
+```
+
+###
+
+::: {.column width="25%"}
+![](./assets/llama-cpp-logo.png "llama.cpp logo"){width="50%"}
+:::
+
+::: {.column width="25%"}
+![](./assets/llama-cpp-python-logo.svg "llama-cpp-python logo"){width="30%"}
+:::
+
+::: {.column width="25%"}
+![](./assets/NousResearch2.jpg "NousResearch logo"){width="50%"}
+:::
+
+::: {.column width="20%"}
+![](./assets/hf.png "HuggingFace logo"){width="100%"}
+:::
+
+- [https://github.com/ggerganov/llama.cpp](https://github.com/ggerganov/llama.cpp)
+- [https://llama-cpp-python.readthedocs.io/](https://llama-cpp-python.readthedocs.io/)
+- [https://nousresearch.com/](https://nousresearch.com/)
+- [https://huggingface.co/](https://huggingface.co/)
+
+### Retrieval Augmented Generation (RAG)
+
+```{python}
+#| echo: true
+import llama_cpp  
+
+model_id = "NousResearch/Hermes-3-Llama-3.1-8B" # <1>
+llm = llama_cpp.Llama(  # <2>
+    "/big_storage/llms/models/Hermes-3-Llama-3.1-8B.Q6_K.gguf",
+    tokenizer=llama_cpp.llama_tokenizer.LlamaHFTokenizer.from_pretrained(
+        model_id
+    ),
+    n_gpu_layers=-1,
+    flash_attn=True,
+    n_ctx=8192,
+    verbose=False,
+    chat_format="chatml-function-calling"
+)
+```
+
+1. [Hermes 3](https://nousresearch.com/hermes3/) by [NousResearch](https://nousresearch.com/)
+2. [llama-cpp-python](https://llama-cpp-python.readthedocs.io/) python bindings for [llama.cpp](https://github.com/ggerganov/llama.cpp)
+
+### Retrieval Augmented Generation (RAG)
+
+```{python}
+#| echo: true
+#| code-line-numbers: 1|3-5|7|1-9
+def get_relevant_texts(query):
+    results = (
+        table.search(query)
+             .limit(5)
+             .to_polars()
+    )
+    return " ".join([results["text"][i] + "\n\n---\n\n" for i in range(5)])
+
+print(get_relevant_texts(query))
+```
+
+### Retrieval Augmented Generation (RAG)
+
+```{python}
+#| echo: true
+#| code-line-numbers: 1|3-4|5-6|1-9
+def build_prompt(query):
+    return (
+        "Answer the question based only on the following context:\n\n"
+        + get_relevant_texts(query)
+        + "\n\nQuestion: "
+        + query
+    )
+
+print(build_prompt(query))
+```
+
+### Retrieval Augmented Generation (RAG)
+
+```{python}
+#| echo: true
+#| code-line-numbers: 1|2|3-7|8|1-8
+def generate_response(query):
+    prompt = build_prompt(query)
+    response = llm.create_chat_completion(
+        messages=[{"role": "user", "content": prompt}], 
+        temperature=0,
+        seed=42
+    )
+    return response["choices"][0]["message"]["content"]
+```
+
+### Retrieval Augmented Generation (RAG)
+
+```{python}
+#| echo: true
+query = """Which song is about a guy who is so badly wounded in war
+so he no longer has any senses?"""
+print(generate_response(query))
+```
+
+### Retrieval Augmented Generation (RAG)
+
+```{python}
+#| echo: true
+query = "Which song is about a boy who is having nightmares?"
+print(generate_response(query))
+```
+
+### Retrieval Augmented Generation (RAG)
+
+[https://alonsosilva-song-finder-bot.hf.space](https://alonsosilva-song-finder-bot.hf.space)
+
+```{python}
+IFrame("https://alonsosilva-song-finder-bot.hf.space", width=850, height=450)
+```
+
+### Retrieval Augmented Generation (RAG)
+
+```{python}
+#| echo: true
+query = "How many songs does the black album have?"
+print(generate_response(query))
+```
+
+### Retrieval Augmented Generation (RAG)
+
+```{python}
+#| echo: true
+df.filter(pl.col("Album") == "The Black Album")["Song"].to_list()
+```
+
+# Graph-only retrieval
+
+### {.nostretch}
+
+![](./assets/kuzu-logo.png "Kùzu logo"){width="40%"}
+
+Graph database: [https://kuzudb.com/](https://kuzudb.com/)
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+# Initialize graph database
+import shutil
+import kuzu
+
+shutil.rmtree("kuzudb_explorer", ignore_errors=True)
+db = kuzu.Database("kuzudb_explorer")
+conn = kuzu.Connection(db)
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+# Create nodes schema
+conn.execute("CREATE NODE TABLE ARTIST(name STRING, PRIMARY KEY (name))")
+conn.execute("CREATE NODE TABLE ALBUM(name STRING, PRIMARY KEY (name))")
+conn.execute(
+"CREATE NODE TABLE SONG(ID SERIAL,name STRING,lyrics STRING,PRIMARY KEY(ID))"
+)
+# Create edges schema
+conn.execute("CREATE REL TABLE IN_ALBUM(FROM SONG TO ALBUM)")
+conn.execute("CREATE REL TABLE FROM_ARTIST(FROM ALBUM TO ARTIST)");
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+# Insert nodes
+for artist in df["Artist"].unique():
+    conn.execute(f"CREATE (artist:ARTIST {{name: '{artist}'}})")
+
+for album in df["Album"].unique():
+    conn.execute(f"""CREATE (album:ALBUM {{name: "{album}"}})""")
+
+for song, lyrics in df.select(["Song", "text"]).unique().rows():
+    replaced_lyrics = lyrics.replace('"', "'")
+    conn.execute(
+        f"""CREATE (song:SONG {{name: "{song}", lyrics: "{replaced_lyrics}"}})"""
+    )
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+# Insert edges
+for song, album, lyrics in df.select(["Song", "Album", "text"]).rows():
+    replaced_lyrics = lyrics.replace('"', "'")
+    conn.execute(
+        f"""
+        MATCH (song:SONG), (album:ALBUM) 
+        WHERE song.name = "{song}" AND song.lyrics = "{replaced_lyrics}" AND album.name = "{album}"
+        CREATE (song)-[:IN_ALBUM]->(album)
+        """
+    )
+for album, artist in df.select(["Album", "Artist"]).unique().rows():
+  conn.execute(
+    f"""
+    MATCH (album:ALBUM), (artist:ARTIST) WHERE album.name = "{album}" AND artist.name = "{artist}"
+    CREATE (album)-[:FROM_ARTIST]->(artist)
+    """
+  )
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+response = conn.execute(
+    """
+    MATCH (a:ALBUM {name: 'The Black Album'})<-[:IN_ALBUM]-(s:SONG) 
+    RETURN s.name
+    """
+)
+
+df_response = response.get_as_pl()
+
+df_response["s.name"].to_list()
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+from langchain_community.graphs import KuzuGraph
+
+graph = KuzuGraph(db)
+print(graph.get_schema)
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+def generate_kuzu_prompt(user_query):
+    return """Task: Generate Kùzu Cypher statement to query a graph database.
+
+Instructions:
+Generate the Kùzu dialect of Cypher with the following rules in mind:
+1. Do not omit the relationship pattern. Always use `()-[]->()` instead of `()->()`.
+2. Do not include triple backticks ``` in your response. Return only Cypher.
+3. Do not return any notes or comments in your response.
+
+
+Use only the provided relationship types and properties in the schema.
+Do not use any other relationship types or properties that are not provided.
+Schema:\n""" + graph.get_schema + """\nExample:
+The question is:\n"Which songs does the load album have?"
+MATCH (a:ALBUM {name: 'Load'})<-[:IN_ALBUM]-(s:SONG) RETURN s.name
+
+Note: Do not include any explanations or apologies in your responses.
+Do not respond to any questions that might ask anything else than for you to construct a Cypher statement.
+Do not include any text except the generated Cypher statement.
+
+The question is:\n""" + user_query
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+def generate_final_prompt(query,cypher_query,col_name,_values):
+    return f"""You are an assistant that helps to form nice and human understandable answers.
+The information part contains the provided information that you must use to construct an answer.
+The provided information is authoritative, you must never doubt it or try to use your internal knowledge to correct it.
+Make the answer sound as a response to the question. Do not mention that you based the result on the given information.
+Here is an example:
+
+Question: Which managers own Neo4j stocks?
+Context:[manager:CTL LLC, manager:JANE STREET GROUP LLC]
+Helpful Answer: CTL LLC, JANE STREET GROUP LLC owns Neo4j stocks.
+
+Follow this example when generating answers.
+If the provided information is empty, say that you don't know the answer.
+Query:\n{cypher_query}
+Information:
+[{col_name}: {_values}]
+
+Question: {query}
+Helpful Answer:
+"""
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+def generate_kg_response(query):
+    prompt = generate_kuzu_prompt(query)
+    cypher_query_response = llm.create_chat_completion(
+        messages=[{"role": "user", "content": prompt}], 
+        temperature=0,
+        seed=42
+    )
+    cypher_query = cypher_query_response["choices"][0]["message"]["content"]
+    response = conn.execute(
+        f"""
+        {cypher_query}
+        """
+    )
+    df = response.get_as_pl()
+    col_name = df.columns[0]
+    _values = df[col_name].to_list()
+    final_prompt = generate_final_prompt(query,cypher_query,col_name,_values)
+    final_response = llm.create_chat_completion(
+        messages=[{"role": "user", "content": final_prompt}], 
+        temperature=0,
+        seed=42
+    )
+    return final_response["choices"][0]["message"]["content"]
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+query = "How many songs does the black album have?"
+print(generate_kg_response(query))
+```
+
+### Graph-only retrieval
+
+```{python}
+#| echo: true
+query = "Which songs does the black album have?"
+print(generate_kg_response(query))
+```
+
+### Graph-only retrieval
+
+[https://alonsosilva-song-finder-graph.hf.space](https://alonsosilva-song-finder-graph.hf.space)
+
+```{python}
+IFrame("https://alonsosilva-song-finder-graph.hf.space", width=850, height=450)
+```
+
+# Combining graph and vector retrieval
+
+### Classification
+
+```{python}
+#| echo: true
+def generate_hermes_prompt(user_prompt):
+    return (
+        "<|im_start|>system\n"
+        "You are a world class AI model classifier"
+        "<|im_end|>\n"
+        "<|im_start|>user\n"
+        + user_prompt
+        + "<|im_end|>"
+        + "\n<|im_start|>assistant\n"
+    )
+```
+
+### Classification
+
+```{python}
+#| echo: true
+from outlines import generate, models
+from outlines.samplers import greedy
+
+def get_classification(query):
+    model = models.LlamaCpp(llm)
+    generator = generate.choice(model, ["YES", "NO"], sampler=greedy())
+    prompt = "Answer only YES or NO. Is the question '" + query + \
+             "' related to the content of a song?"
+    prompt = generate_hermes_prompt(prompt)
+    response = generator(prompt, max_tokens=1024, temperature=0, seed=42)
+    return response
+```
+
+### Classification
+
+```{python}
+#| echo: true
+queries = [
+    "Which song is about a boy who is having nightmares?",
+    "Which song is about a guy who is so badly wounded in war so he no longer has any senses?",
+    "How many songs does the black album have?",
+    "Which songs does the black album have?"
+]
+for query in queries:
+    print(f"**{query}**")
+    print(get_classification(query))
+    print()
+```
+
+```{python}
+# #| echo: true
+# def get_classification(query):
+#     prompt = "Answer only YES or NO. Is the question '" + query + "' related to the content of a song?"
+#     response = llm.create_chat_completion(
+#         messages=[{"role": "user", "content": prompt}], 
+#         temperature=0,
+#         seed=42
+#     )
+#     return response["choices"][0]["message"]["content"]
+```
+
+```{python}
+# #| echo: true
+# print(get_classification("Which song is about a boy who is having nightmares?"))
+# print(get_classification((
+#     "Which song is about a guy who is so badly wounded in war "
+#     "so he no longer has any senses"
+# )))
+# print(get_classification("How many songs does the black album have?"))
+# print(get_classification("Which songs does the black album have?"))
+```
+
+### Combining graph and vector retrieval
+
+```{python}
+#| echo: true
+def get_final_response(query):
+    query_class = get_classification(query)
+    if query_class == 'YES':
+        response = generate_response(query)
+    else:
+        response = generate_kg_response(query)
+    return response
+```
+
+### Combining graph and vector retrieval
+
+```{python}
+#| echo: true
+queries = [
+    "Which song is about a boy who is having nightmares?",
+    "Which song is about a guy who is so badly wounded in war so he no longer has any senses",
+    "How many songs does the black album have?",
+    "Which songs does the black album have?"
+]
+for query in queries:
+    print(f"**{query}**")
+    print(get_final_response(query))
+    print()
+```
+
+### Combining graph and vectorial retrieval
+
+[https://alonsosilva-song-finder-graphrag.hf.space](https://alonsosilva-song-finder-graphrag.hf.space)
+
+```{python}
+IFrame("https://alonsosilva-song-finder-graphrag.hf.space", width=850, height=450)
+```
+
+# What is Structured Generation?
+
+##
+::: {style="margin-top: 100px; font-size: 2em; color: black;"}
+The problem
+:::
+
+##
+
+![scikit-llm: [https://skllm.beastbyte.ai/](https://skllm.beastbyte.ai/)](./assets/scikit-llm.jpg "scikit-llm Homepage"){ width=50% }
+
+### Show me the prompt!
+
+![scikit-llm prompts: [https://github.com/iryna-kondr/scikit-llm/blob/main/skllm/prompts/templates.py](https://github.com/iryna-kondr/scikit-llm/blob/main/skllm/prompts/templates.py)](./assets/scikit-llm-prompt.jpg "scikit-llm prompt"){ width=25% }
+
+###
+
+![](./assets/we-can-do-better.jpg "We can do better!"){ width=50% }
+
+###
+::: {style="margin-top: 200px; font-size: 2em; color: black;"}
+What is NOT Structured Generation?
+:::
+
+### Structured Outputs (in the style of Instructor/Marvin libraries)
+
+- Instructor: [https://python.useinstructor.com/](https://python.useinstructor.com/)
+- Marvin: [https://www.askmarvin.ai/](https://www.askmarvin.ai/)
+
+
+### Structured Outputs in Code
+
+```{python}
+#| echo: true
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class Sentiment(BaseModel):
+    """Correctly inferred `Sentiment` with all the required parameters
+    with correct types."""
+
+    label: Literal["Positive", "Negative"] = Field(
+        ..., description="Sentiment of the text"
+    )
+```
+
+### Structured Outputs in Code
+
+```{python}
+#| echo: true
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
+tools = [convert_to_openai_tool(Sentiment)]
+tools
+```
+
+```{python}
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+```
+
+### Structured Outputs in Code
+
+```{python}
+#| echo: true
+#| code-line-numbers: '1-17|1|1,8-9|1,8-9,13-14'
+user_input = "You are great"
+
+output = llm.create_chat_completion(
+    messages=[
+        {
+            "role": "user",
+            "content": (
+                "What is the sentiment conveyed in the following text: "
+                f"{user_input}."
+            ),
+        },
+    ],
+    tools=tools,
+    tool_choice={"type": "function", "function": {"name": "Sentiment"}},
+)
+
+output["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+```
+
+##
+
+![](./assets/we-can-do-better.jpg "We can do better!"){ width=50% }
+
+###
+::: {style="margin-top: 200px; font-size: 2em; color: black;"}
+What is Structured Generation?
+:::
+
+### {.nostretch}
+
+![](./assets/outlines-logo.webp "Outlines logo"){width="40%"}
+
+[https://dottxt-ai.github.io/outlines/](https://dottxt-ai.github.io/outlines/)
+
+### Observation: LLMs are samplers
+
+[https://alonsosilva-nexttokenprediction.hf.space](https://alonsosilva-nexttokenprediction.hf.space)
+
+```{python}
+IFrame("https://alonsosilva-nexttokenprediction.hf.space", width=950, height=450)
+```
+
+###  We need to talk about Regular Expressions (regex)
+
+![](./assets/torture-regex.jpg "Let the torture commence meme"){ width=50% }
+
+### Regular Expression (regex)
+
+![](./assets/regex_chatgpt.jpg "ChatGPT explaining the regex a*b*"){ width=25% }
+
+### Deterministic Finite Automata (DFA) {.nostretch}
+
+![](./assets/Structured-Generation-1.jpg "Diagrams explaining"){fig-align="center" width="50%"}
+
+[Fast, High-Fidelity LLM Decoding with Regex Constraints](https://github.com/vivien000/regex-constrained-decoding) by [Vivien Tran-Thien](https://github.com/vivien000)
+
+### Deterministic Finite Automata (DFA) {.nostretch}
+
+![](./assets/Structured-Generation-2.jpg "Diagrams explaining"){fig-align="center" width="50%"}
+
+[Fast, High-Fidelity LLM Decoding with Regex Constraints](https://github.com/vivien000/regex-constrained-decoding) by [Vivien Tran-Thien](https://github.com/vivien000)
+
+### Deterministic Finite Automata (DFA) {.nostretch}
+
+![](./assets/Structured-Generation-3.jpg "Diagrams explaining"){fig-align="center" width="60%"}
+
+[Fast, High-Fidelity LLM Decoding with Regex Constraints](https://github.com/vivien000/regex-constrained-decoding) by [Vivien Tran-Thien](https://github.com/vivien000)
+
+### Back to the problem
+
+![scikit-llm prompts: [https://github.com/iryna-kondr/scikit-llm/blob/main/skllm/prompts/templates.py](https://github.com/iryna-kondr/scikit-llm/blob/main/skllm/prompts/templates.py)](./assets/scikit-llm-prompt.jpg "scikit-llm prompt"){ width=25% }
+
+### From regular expression (regex) to deterministic finite automata (DFA)
+
+For example, for sentiment analysis:
+
+![](./assets/fsm-simple.jpg){ width=25% }
+
+### Life is hard
+
+![](./assets/fsm-full.jpg){ width=25% }
+
+### What's in a "label"?
+
+![](./assets/what-is-in-a-label.jpg){ width=25% }
+
+### Structured Generation in Code
+
+```{python}
+#| echo: true
+#| code-line-numbers: 1-13|12
+import outlines
+
+import transformers
+
+outlines_tokenizer = outlines.models.TransformerTokenizer(
+    transformers.AutoTokenizer.from_pretrained(model_id)
+)
+
+outlines_logits_processor = outlines.processors.JSONLogitsProcessor(
+    Sentiment,
+    outlines_tokenizer,
+    whitespace_pattern=r"[\n\t ]*"  # <1>
+)
+```
+
+1. I like to give the language model some structure but also some leeway.
+
+### Structured Generation in Code
+
+```{python}
+#| echo: true
+#| code-line-numbers: '1-18|1|1,8-9|1,8-9,13-15'
+user_input = "You are great"
+
+output = llm.create_chat_completion(
+    messages=[
+        {
+            "role": "user",
+            "content": (
+                "What is the sentiment conveyed in the following text: "
+                f"{user_input}."
+            ),
+        },
+    ],
+    logits_processor=transformers.LogitsProcessorList(
+        [outlines_logits_processor]
+    ),
+)
+
+output["choices"][0]["message"]["content"]
+```
+
+## Structured Outputs + Structured Generation
+
+###
+
+```{python}
+outlines_logits_processor = outlines.processors.JSONLogitsProcessor(
+    Sentiment,
+    outlines_tokenizer,
+    whitespace_pattern=r"[\n\t ]*"
+)
+```
+
+```{python}
+#| echo: true
+#| code-line-numbers: 1-18|12-13|14-16|1-18
+user_input = "You are great"
+output = llm.create_chat_completion(
+    messages=[
+        {
+            "role": "user",
+            "content": (
+                "What is the sentiment conveyed in the following text: "
+                f"{user_input}."
+            ),
+        },
+    ],
+    tools=tools,  # <1>
+    tool_choice={"type": "function", "function": {"name": "Sentiment"}}, # <1>
+    logits_processor=transformers.LogitsProcessorList(  # <2>
+        [outlines_logits_processor]  # <2>
+    ),  # <2>
+)
+output["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+```
+
+1. Structured Outputs
+2. Structured Generation
+
+# Knowledge Graph Generation
+
+### Consider a text
+
+```{python}
+#| echo: true
+with open('./assets/curie.txt', "r") as f:
+    curie_text = f.read()
+print(curie_text)
+```
+
+### Chunk the text
+
+```{python}
+#| echo: true
+texts = curie_text.split("\n\n")
+texts
+```
+
+###
+
+```{python}
+#| echo: true
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class Node(BaseModel):
+    """Node of the Knowledge Graph"""
+    id: int = Field(
+        ..., description="Unique identifier of the node starting at zero"
+    )
+    type: str = Field(..., description="Type of the node")
+    label: str = Field(..., description="Label of the node")
+
+class Edge(BaseModel):
+    """Edge of the Knowledge Graph"""
+    source: int = Field(..., description="Unique source of the edge")
+    target: int = Field(..., description="Unique target of the edge")
+    type: str = Field(..., description="Type of the edge")
+    label: str = Field(..., description="Label of the edge")
+```
+
+```{python}
+#| output: false
+# from pydantic import BaseModel, Field
+# from typing import Optional
+
+# class Node(BaseModel):
+#     """Node of the Knowledge Graph"""
+#     id: int = Field(..., description="Unique identifier of the node")
+#     type: str = Field(..., description="Type of the node")
+#     label: str = Field(..., description="Label of the node")
+#     property: Optional[str] = Field(
+#         default=None, description="Property of the node")
+# class Edge(BaseModel):
+#     """Edge of the Knowledge Graph"""
+#     source: int = Field(..., description="Unique source of the edge")
+#     target: int = Field(..., description="Unique target of the edge")
+#     type: str = Field(..., description="Type of the edge")
+#     label: str = Field(..., description="Label of the edge")
+#     property: Optional[str] = Field(
+#         default=None, description="Property of the edge")
+```
+
+###
+
+```{python}
+#| echo: true
+from typing import List
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
+class KnowledgeGraph(BaseModel):
+    """Generated Knowledge Graph"""
+    nodes: List[Node] = Field(
+        ..., description="List of nodes of the knowledge graph")
+    edges: List[Edge] = Field(
+        ..., description="List of edges of the knowledge graph")
+
+tools = [convert_to_openai_tool(KnowledgeGraph)]
+```
+
+###
+
+```{python}
+#| echo: true
+#| code-line-numbers: '6-9,14-15|1-18'
+def build_messages(text: str):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a world class AI model who answers questions " 
+                "in JSON with correct Pydantic schema. "
+                "Here's the json schema you must adhere to:\n<schema>\n"
+                f"{KnowledgeGraph.schema_json()}\n</schema>"
+            )
+        },{
+            "role": "user",
+            "content": (
+                "Describe the following text as a detailed " 
+                f"knowledge graph:\n{text}"
+            )
+        }]
+    return messages
+```
+
+```{python}
+#| output: false
+build_messages("Alice loves Bob")
+```
+
+###
+
+```{python}
+#| echo: true
+#| code-line-numbers: 9-13|1-18
+def generate_assistant_message(messages):
+    outlines_logits_processor = outlines.processors.JSONLogitsProcessor(
+        KnowledgeGraph,
+        outlines_tokenizer,
+        whitespace_pattern=r"[\n\t ]*"
+    )
+    output = llm.create_chat_completion(
+        messages=messages,
+        tools=tools, # <1>
+        tool_choice={"type": "function", 
+                     "function": {"name": "KnowledgeGraph"}},
+        logits_processor=transformers.LogitsProcessorList( # <2>
+            [outlines_logits_processor]),
+        temperature=0,
+        seed=42,
+        max_tokens=5000,
+    )
+    return output["choices"][0]["message"]
+```
+
+1. Structured Outputs
+2. Structured Generation
+
+```{python}
+#| output: false
+messages = build_messages("Alice loves Bob")
+generate_assistant_message(messages)
+```
+
+##
+
+```{python}
+#| echo: true
+def generate_kg(text):
+    messages = build_messages(text)
+    assistant_message = generate_assistant_message(messages)
+    return assistant_message["tool_calls"][0]["function"]["arguments"]
+    
+generate_kg("Alice loves Bob")
+```
+
+```{python}
+#| output: false
+kg = generate_kg("Alice loves Bob")
+kg
+```
+
+##
+
+```{python}
+#| echo: true
+import json
+
+nodes, edges = [], []
+for text in texts:
+    kg = generate_kg(text)
+    nodes.append(json.loads(kg)["nodes"])
+    edges.append(json.loads(kg)["edges"])
+```
+
+### Node and Edge Type Candidates
+
+```{python}
+#| echo: true
+from collections import Counter
+
+print(
+    Counter([node["type"].upper() for i in range(len(texts)) 
+             for node in nodes[i]])
+)
+print(
+    Counter([edge["type"].upper() for i in range(len(texts)) 
+             for edge in edges[i]])
+)
+```
+
+### {auto-animate=true}
+
+```{python}
+#| echo: true
+#| code-line-numbers: '8,14'
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
+
+class Node(BaseModel):
+    """Node of the Knowledge Graph"""
+    id: int = Field(
+        ..., description="Unique identifier of the node starting at zero")
+    type: str = Field(..., description="Type of the node")
+    label: str = Field(..., description="Label of the node")
+
+class Edge(BaseModel):
+    """Edge of the Knowledge Graph"""
+    source: int = Field(..., description="Unique source of the edge")
+    target: int = Field(..., description="Unique target of the edge")
+    type: str = Field(..., description="Type of the edge")
+    label: str = Field(..., description="Label of the edge")
+```
+
+### {auto-animate=true}
+
+```{python}
+#| echo: true
+#| code-line-numbers: '7-9,15-17'
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
+class Node(BaseModel):
+    """Node of the Knowledge Graph"""
+    id: int = Field(
+        ..., description="Unique identifier of the node starting at zero")
+    type: Literal[
+    "PERSON", "AWARD", "DISCOVERY", "LOCATION", "OTHER"
+    ] = Field(..., description="Type of the node")
+    label: str = Field(..., description="Label of the node")
+class Edge(BaseModel):
+    """Edge of the Knowledge Graph"""
+    source: int = Field(..., description="Unique source of the edge")
+    target: int = Field(..., description="Unique target of the edge")
+    type: Literal[
+    "DISCOVERED", "AWARDED", "INTERPERSONALRELATIONSHIP", "VISITED", "OTHER"
+    ] = Field(..., description="Type of the edge")
+    label: str = Field(..., description="Label of the edge")
+```
+
+```{python}
+#| echo: false
+from typing import List
+
+class KnowledgeGraph(BaseModel):
+    """Generated Knowledge Graph"""
+    nodes: List[Node] = Field(..., description="List of nodes of the knowledge graph")
+    edges: List[Edge] = Field(..., description="List of edges of the knowledge graph")
+```
+
+```{python}
+#| echo: false
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
+tools = [convert_to_openai_tool(KnowledgeGraph)]
+```
+
+```{python}
+#| echo: false
+import json
+
+nodes, edges = [], []
+for text in texts:
+    kg = generate_kg(text)
+    nodes.append(json.loads(kg)["nodes"])
+    edges.append(json.loads(kg)["edges"])
+```
+
+###
+
+::: {.panel-tabset}
+
+## Chunk 1
+
+```{python}
+#| echo: true
+#| code-fold: true
+from graphviz import Digraph
+
+dot = Digraph()
+i = 0
+for node in nodes[i]:
+    if node['type'] != "OTHER":
+        dot.node(str(node['id']), node['type']+"\n"+node['label'], shape='circle', width='1', height='1')
+for edge in edges[i]:
+    if edge["type"] != "OTHER": #and nodes[i][edge["source"]]["type"]!= "OTHER" and nodes[i][edge["target"]]["type"]!= "OTHER":
+        dot.edge(str(edge['source']), str(edge['target']), label=edge['type']+"\n"+ edge['label'])
+print(texts[i])
+dot
+```
+
+## Chunk 2
+
+```{python}
+#| echo: true
+#| code-fold: true
+from graphviz import Digraph
+
+dot = Digraph()
+i = 1
+for node in nodes[i]:
+    if node['type'] != "OTHER":
+        dot.node(str(node['id']), node['type']+"\n"+node['label'], shape='circle', width='1', height='1')
+for edge in edges[i]:
+    if edge["type"] != "OTHER": #and nodes[i][edge["source"]]["type"]!= "OTHER" and nodes[i][edge["target"]]["type"]!= "OTHER":
+        dot.edge(str(edge['source']), str(edge['target']), label=edge['type']+"\n"+ edge['label'])
+print(texts[i])
+dot
+```
+
+## Chunk 3
+
+```{python}
+#| echo: true
+#| code-fold: true
+from graphviz import Digraph
+
+dot = Digraph()
+i = 2
+for node in nodes[i]:
+    if node['type'] != "OTHER":
+        dot.node(str(node['id']), node['type']+"\n"+node['label'], shape='circle', width='1', height='1')
+for edge in edges[i]:
+    if edge["type"] != "OTHER": #and nodes[i][edge["source"]]["type"]!= "OTHER" and nodes[i][edge["target"]]["type"]!= "OTHER":
+        dot.edge(str(edge['source']), str(edge['target']), label=edge['type']+"\n"+ edge['label'])
+print(texts[i])
+dot
+```
+
+## Chunk 4
+
+```{python}
+#| echo: true
+#| code-fold: true
+from graphviz import Digraph
+
+dot = Digraph()
+i = 3
+for node in nodes[i]:
+    if node['type'] != "OTHER":
+        dot.node(str(node['id']), node['type']+"\n"+node['label'], shape='circle', width='1', height='1')
+for edge in edges[i]:
+    if edge["type"] != "OTHER":
+        dot.edge(str(edge['source']), str(edge['target']), label=edge['type']+"\n"+ edge['label'])
+print(texts[i])
+dot
+```
+
+:::
+
+###
+
+```{python}
+#| echo: true
+import pandas as pd
+
+df_nodes = pd.DataFrame(nodes[0])
+df_edges = pd.DataFrame({
+    'source': [nodes[0][edge['source']]['label'] for edge in edges[0]],
+    'target': [nodes[0][edge['target']]['label'] for edge in edges[0]],
+    'type': [edge['type'] for edge in edges[0]],
+    'label': [edge['label'] for edge in edges[0]]
+})
+for i in range(1,len(texts)):
+    df_nodes_aux = pd.DataFrame({
+        'id': [node['id']+len(df_nodes) for node in nodes[i]],
+        'label': [node['label'] for node in nodes[i]],
+        'type': [node['type'] for node in nodes[i]]
+    })
+    df_edges_aux = pd.DataFrame({
+        'source': [nodes[i][edge['source']]['label'] for edge in edges[i]],
+        'target': [nodes[i][edge['target']]['label'] for edge in edges[i]],
+        'type': [edge['type'] for edge in edges[i]],
+        'label': [edge['label'] for edge in edges[i]]
+    })
+    df_nodes = pd.concat([df_nodes, df_nodes_aux])
+    df_edges = pd.concat([df_edges, df_edges_aux])
+
+df_nodes=df_nodes[df_nodes["type"]!="OTHER"].drop_duplicates(subset="label")
+df_edges=df_edges[df_edges["type"]!="OTHER"]
+```
+
+### Insert nodes to the graph db
+
+```{python}
+#| echo: true
+import kuzu
+
+db = kuzu.Database()
+conn = kuzu.Connection(db)
+# create schema
+conn.execute("CREATE NODE TABLE Person(name STRING, PRIMARY KEY (name))");
+conn.execute("CREATE NODE TABLE Award(name STRING, PRIMARY KEY (name))");
+conn.execute("CREATE NODE TABLE Discovery(name STRING, PRIMARY KEY (name))");
+conn.execute("CREATE NODE TABLE Location(name STRING, PRIMARY KEY (name))");
+# copy from dataframes
+df_nodes_person = df_nodes[df_nodes["type"] == "PERSON"][["label"]]
+df_nodes_award = df_nodes[df_nodes["type"] == "AWARD"][["label"]]
+df_nodes_discovery = df_nodes[df_nodes["type"] == "DISCOVERY"][["label"]]
+df_nodes_location = df_nodes[df_nodes["type"] == "LOCATION"][["label"]]
+conn.execute("COPY Person FROM df_nodes_person");
+conn.execute("COPY Award FROM df_nodes_award");
+conn.execute("COPY Discovery FROM df_nodes_discovery");
+conn.execute("COPY Location FROM df_nodes_location");
+```
+
+### Check for nodes
+
+```{python}
+#| echo: true
+result = conn.execute("MATCH (person:Person) RETURN person.name;")
+while result.has_next():
+    print(result.get_next())
+```
+
+### Insert edges to the graph db
+
+```{python}
+#| echo: true
+conn.execute("CREATE REL TABLE Awarded(FROM Person TO Award)"); # create schema
+conn.execute("CREATE REL TABLE Discovered(FROM Person TO Discovery)");
+conn.execute("CREATE REL TABLE Interpersonal_Relationship(FROM Person TO Person)");
+conn.execute("CREATE REL TABLE Visited(FROM Person TO Location)");
+def my_func(edge_type: str, source: str, target: str):
+    mask1 = [a in list(df_nodes[df_nodes["type"] == source]['label']) for a in df_edges[df_edges["type"] == edge_type]["source"]]
+    mask2 = [a in list(df_nodes[df_nodes["type"] == target]['label']) for a in df_edges[df_edges["type"] == edge_type]["target"]]
+    mask = [a & b for a,b in zip(mask1,mask2)]
+    return df_edges[df_edges["type"] == edge_type][mask]
+df_edges_awarded = my_func("AWARDED", "PERSON", "AWARD")[["source", "target"]]
+df_edges_discovered = my_func("DISCOVERED", "PERSON", "DISCOVERY")[["source", "target"]]
+df_edges_visited = my_func("VISITED", "PERSON", "LOCATION")[["source", "target"]]
+df_edges_interpersonal_relationship = my_func("INTERPERSONALRELATIONSHIP", "PERSON", "PERSON")[["source", "target"]]
+conn.execute("COPY Discovered FROM df_edges_discovered"); # copy from dataframes
+conn.execute("COPY Awarded FROM df_edges_awarded");
+conn.execute("COPY Visited FROM df_edges_visited");
+conn.execute("COPY Interpersonal_Relationship FROM df_edges_interpersonal_relationship");
+```
+
+### Check for edges
+
+```{python}
+#| echo: true
+result = conn.execute("MATCH (a)-[:DISCOVERED]->(c) RETURN a.name, c.name;")
+while result.has_next():
+    print(result.get_next())
+```
+
+# KG-based Agents
+
+### {.nostretch}
+
+![](./assets/KG-Agent.jpg "Knowledge Graph Based Agent"){fig-align="center" width="80%"}
+
+## Tools
+
+### Tool: Query Checker
+
+```{python}
+#| echo: true
+def build_kuzu_query_checker_prompt(cypher_query):
+    return (
+    f"\n{cypher_query}\n"
+    "Double check the Kùzu dialect of Cypher for the query above "
+    "for common mistakes, including:\n"
+    "- Using the correct number of arguments for functions\n"
+    "- Casting to the correct data type\n"
+    "- Do not omit the relationship pattern.\n" 
+    "- Always use `()-[]->()` instead of `()->()`.\n\n"
+    "If there are any of the above mistakes, rewrite the query. "
+    "If there are no mistakes, just reproduce the original query.\n\n"
+    "Output the final Kùzu Cypher query only.\n\n"
+    "Kùzu Cypher Query: "
+    )
+```
+
+### Tool: Query Checker
+
+```{python}
+#| echo: true
+def query_checker_tool(cypher_query):
+    user_prompt = build_kuzu_query_checker_prompt(cypher_query)
+    response = llm.create_chat_completion(
+        messages=[{"role": "user", "content": user_prompt}]
+    )
+    return response["choices"][0]["message"]["content"]
+
+
+query_checker_tool(
+"MATCH (p:Person)-[:Discovered]-<(:Discovery {name: 'Polonium'})\nRETURN *"
+)
+```
+
+```{python}
+#| output: false
+query_checker_tool("""MATCH (s:SONG)-[:IN_ALBUM]-<(:ALBUM {name: 'The Black Album'})\nRETURN COUNT(s)""")
+```
+
+### Tool: Query Generator + Executor
+
+```{python}
+#| echo: true
+from langchain_community.graphs import KuzuGraph
+
+graph_db_schema = KuzuGraph(db).get_schema
+print(graph_db_schema)
+```
+
+### Tool: Query Generator + Executor
+
+```{python}
+#| echo: true
+def build_kuzu_prompt(query, graph_db_schema=graph_db_schema):
+    return """Task: Generate Kùzu Cypher statement to query a graph database.
+
+Instructions:
+Generate the Kùzu dialect of Cypher with the following rules in mind:
+1. Do not omit the relationship pattern. Always use `()-[]->()` instead of `()->()`.
+2. Do not include triple backticks ``` in your response. Return only Cypher.
+3. Do not return any notes or comments in your response.
+
+Use only the provided relationship types and properties in the schema.
+Do not use any other relationship types or properties that are not provided.
+Schema:\n""" + graph_db_schema + """
+\nExample:
+The question is:\n"Which songs does the load album have?"
+MATCH (a:ALBUM {name: 'Load'})<-[:IN_ALBUM]-(s:SONG) RETURN s.name
+Note: Do not include any explanations or apologies in your responses.
+Do not respond to any questions that might ask anything else than for you to construct a Cypher statement.
+Do not include any text except the generated Cypher statement.
+
+The question is:\n""" + query
+```
+
+### Tool: Query Generator + Executor
+
+```{python}
+#| echo: true
+def query_generator_tool(query):
+    user_prompt = build_kuzu_prompt(query)
+    output = llm.create_chat_completion(
+        messages = [{"role": "user", "content": user_prompt}]
+    )
+    cypher_query = output['choices'][0]['message']['content']
+    cypher_query = query_checker_tool(cypher_query)
+    print(f"\x1b[33m Cypher query: {cypher_query} \x1b[0m")
+    response = conn.execute(f"{cypher_query}");
+    df = response.get_as_pl()
+    col_name = df.columns[0]
+    _values = df[col_name].to_list()
+    return f"[{col_name}: {_values}]"
+    
+query_generator_tool("What discovery is Marie Curie famous for?")
+```
+
+```{python}
+#| output: false
+query_generator_tool("What discovery is Marie Curie famous for?")
+```
+
+### Tool: Conversational Response
+
+```{python}
+#| echo: true
+def conversational_response(text):
+    return text
+```
+
+```{python}
+#| output: false
+conversational_response("""Respond to the user's greeting in a friendly manner.""")
+```
+
+## ReAct agent
+
+```{python}
+#| echo: true
+from pydantic import BaseModel, Field
+
+
+class Reason_and_Act(BaseModel):
+    Scratchpad: str = Field(
+        ...,
+        description="Information from the Observation useful to answer the question",
+    )
+    Thought: str = Field(
+        ...,
+        description="It describes your thoughts about the question you have been asked",
+    )
+    Action: Literal["conversational_response", "query_generator", "query_checker"] = (
+        Field(..., description="The action to take")
+    )
+    Action_Input: str = Field(..., description="The arguments of the Action.")
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+class Final_Answer(BaseModel):
+    Scratchpad: str = Field(
+        ...,
+        description="Information from the Observation useful to answer the question",
+    )
+    Final_Answer: str = Field(
+        ..., description="Answer to the question grounded on the Observation"
+    )
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+class Decision(BaseModel):
+    Decision: Reason_and_Act | Final_Answer
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+from outlines import generate, models
+from outlines.fsm.json_schema import build_regex_from_schema, convert_json_schema_to_str
+
+model = models.LlamaCpp(llm)
+schema_str = convert_json_schema_to_str(json_schema=Decision.schema_json())
+regex_str = build_regex_from_schema(schema_str)
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+#| code-line-numbers: 1-27|6-7
+def generate_hermes_prompt(question, schema=""):
+    return (
+        "<|im_start|>system\n"
+        "You are a world class AI model who answers questions in JSON with correct Pydantic schema."
+        f"\nHere's the JSON schema you must adhere to:\n<schema>\n{schema}\n</schema>\n"
+        "You run in a loop of Scratchpad, Thought, Action, Action Input, PAUSE, Observation."
+        "\nAt the end of the loop you output a Final Answer. "
+        "\n- Use Scratchpad to store the information from the observation useful to answer the question"
+        "\n- Use Thought to describe your thoughts about the question you have been asked "
+        "and reflect carefully about the Observation if it exists. "
+        "\n- Use Action to run one of the actions available to you. "
+        "\n- Use Action Input to input the arguments of the selected action - then return PAUSE. "
+        "\n- Observation will be the result of running those actions. "
+        "\nYour available actions are:\n"
+        "query_generator:\n" 
+        "e.g. query_generator: Who is Marie Curie related to?\n"
+        "Returns a detailed and correct Kùzu Cypher query\n"
+        "query_checker:\n"
+        "e.g. query_checker: MATCH (a:ALBUM {name: 'The Black Album'})<-[:IN_ALBUM]-(s:SONG) RETURN COUNT(s)\n"
+        "Returns a detailed and correct Kùzu Cypher query after double checking the query for common mistakes\n"
+        "conversational_reponse:"
+        "e.g. conversational_response: Hi!\n"
+        "Returns a conversational response to the user\n"
+        "DO NOT TRY TO GUESS THE ANSWER. Begin! <|im_end|>"
+        "\n<|im_start|>user\n" + question + "<|im_end|>"
+        "\n<|im_start|>assistant\n"
+    )
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+class ChatBot:
+    def __init__(self, prompt=""):
+        self.prompt = prompt
+
+    def __call__(self, user_prompt):
+        self.prompt += user_prompt
+        result = self.execute()
+        return result
+        
+    def execute(self):
+        generator = generate.regex(model, regex_str)
+        result = generator(self.prompt, max_tokens=1024, temperature=0, seed=42)
+        return result
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+import json
+
+def query(question, max_turns=5):
+    i = 0
+    next_prompt = (
+        "\n<|im_start|>user\n" + question + "<|im_end|>"
+        "\n<|im_start|>assistant\n"
+    )
+    previous_actions = []
+    while i < max_turns:
+        i += 1
+        prompt = generate_hermes_prompt(question=question, schema=Decision.schema_json())
+        bot = ChatBot(prompt=prompt)
+        result = bot(next_prompt)
+        json_result = json.loads(result)['Decision']
+        if "Final_Answer" not in list(json_result.keys()):
+            scratchpad = json_result['Scratchpad'] if i == 0 else ""
+            thought = json_result['Thought']
+            action = json_result['Action']
+            action_input = json_result['Action_Input']
+            print(f"\x1b[34m Scratchpad: {scratchpad} \x1b[0m")
+            print(f"\x1b[34m Thought: {thought} \x1b[0m")
+            print(f"\x1b[36m  -- running {action}: {str(action_input)}\x1b[0m")
+            if action + ": " + str(action_input) in previous_actions:
+                observation = "You already run that action. **TRY A DIFFERENT ACTION INPUT.**"
+            else:
+                if action=="query_checker":
+                    try:
+                        observation = query_checker_tool(str(action_input))
+                    except Exception as e:
+                        observation = f"{e}"
+                elif action=="query_generator":
+                    try:
+                        observation = query_generator_tool(str(action_input))
+                    except Exception as e:
+                        observation = f"{e}"
+                elif action=="conversational_response":
+                    try:
+                        observation = conversational_response(str(action_input))
+                        observation += "\nAnswer to the user."
+                    except Exception as e:
+                        observation = f"{e}"
+            print()
+            print(f"\x1b[33m Observation: {observation} \x1b[0m")
+            print()
+            previous_actions.append(action + ": " + str(action_input))
+            next_prompt += (
+                "\nScratchpad: " + scratchpad +
+                "\nThought: " + thought +
+                "\nAction: " + action  +
+                "\nAction Input: " + action_input +
+                "\nObservation: " + str(observation)
+            )
+        else:
+            scratchpad = json_result["Scratchpad"]
+            final_answer = json_result["Final_Answer"]
+            print(f"\x1b[34m Scratchpad: {scratchpad} \x1b[0m")
+            print(f"\x1b[34m Final Answer: {final_answer} \x1b[0m")
+            return final_answer
+    print(f"\nFinal Answer: I am sorry, but I am unable to answer your question. Please provide more information or a different question.")
+    return "No answer found"
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+query("Query the database to see which discovery did Pierre Curie do?")
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+query("Query the database to see which discovery did Marie Curie do?")
+```
+
+### ReAct Agent
+
+```{python}
+#| echo: true
+query("Tell me a joke.")
+```
+
+# Conclusions
+
+### Conclusions
+
+- The goal is to provide better context to the LLM prior to generating its response
+- Combining graph + vector retrieval help us to achieve this goal better than vector-only retrieval or graph-only retrieval
+- Structured Outputs + Structured Generation help us to generate Knowledge Graphs from unstructured data
+- Structured Outputs + Structured Generation help us create KG-based Agents that can query graph databases as well as calling other tools
+
+### References {visibility="uncounted"}
+
+- [Enhancing the Accuracy of RAG Applications With Knowledge Graphs](https://neo4j.com/developer-blog/enhance-rag-knowledge-graph/) by Tomaž Bratanič
+- [A GenAI-Powered Song Finder in Four Lines of Code](https://neo4j.com/developer-blog/genai-powered-song-finder/) by Christoffer Bergman
+- [Graph RAG strategies using Kùzu](https://github.com/kuzudb/graph-rag) by Prashanth Rao
+- [Coalescence](https://blog.dottxt.co/coalescence.html) by [Will Kurt](https://twitter.com/willkurt)
+- [Fast, High-Fidelity LLM Decoding with Regex Constraints](https://github.com/vivien000/regex-constrained-decoding) by [Vivien Tran-Thien](https://github.com/vivien000)
+- [A simple Python implementation of the ReAct pattern for LLMs](https://til.simonwillison.net/llms/python-react-pattern) by [Simon Willison](https://simonwillison.net/)
+- [LanceDB](https://github.com/lancedb/lancedb) (vector DB) + [Kùzu](https://github.com/kuzudb/kuzu) (graph DB) + [Llama.cpp](https://github.com/abetlen/llama-cpp-python) (inference) + [Outlines](https://dottxt-ai.github.io/outlines/) (structured generation) + [LangChain](https://github.com/langchain-ai/langchain) (framework) + [Solara](https://github.com/widgetti/solara) (visualization)
+
+### How was my presentation? {visibility="uncounted"}
+
+Please, leave me your anonymous feedback at [https://www.admonymous.co/alonsosilva](https://www.admonymous.co/alonsosilva)
